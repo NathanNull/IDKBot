@@ -6,14 +6,14 @@
 # number of times the phrase "idk" has been said in the channel and will display that 
 # count any time a user types the command "!idk count"
 
-import discord
-import os
-import sys
-import time
+import discord, os, sys, time, signal, asyncio
 from dotenv import load_dotenv
 
+ISTEST = os.path.isfile("./is_test.txt")
+
 # Functions for getting/saving data
-def get_data(filename, format_fn = lambda t:[int(s) for s in t]):
+def get_data(format_fn = lambda t:[int(s) for s in t]):
+    filename = "channels_test.txt" if ISTEST else "channels.txt"
     file = open(filename, "r")
     data = {}
     for line in file:
@@ -23,7 +23,8 @@ def get_data(filename, format_fn = lambda t:[int(s) for s in t]):
     
     return data
 
-def save_data(filename, data, format_fn = lambda t:[str(i) for i in t]):
+def save_data(data, format_fn = lambda t:[str(i) for i in t]):
+    filename = "channels_test.txt" if ISTEST else "channels.txt"
     file = open(filename, "w")
     for item in data.items():
         file.write(":".join(format_fn(item)))
@@ -128,7 +129,7 @@ class IDKBot(discord.Client):
 
         # Get dict of stored channels
         self.channels = {
-            int(key):int(val) for (key,val) in get_data("channels.txt").items()
+            int(key):int(val) for (key,val) in get_data().items()
         }
     
     async def get_initial_idks(self, channel):
@@ -156,12 +157,8 @@ class IDKBot(discord.Client):
         for (server, channel) in self.channels.items():
             print(server)
             self.idk_counts[channel] = await self.get_initial_idks(self.get_channel(channel))
-            await self.get_guild(server).system_channel.send("IDKBot is online! You may begin IDKing.")
 
-        # Send a message to the system channel in any server we dont't have a channel for
-        for server in self.guilds:
-            if server.id not in self.channels.keys():
-                await server.system_channel.send("You haven't given me a channel to count IDKs in. Please type '!idk bind' in the channel you would like me to watch.")
+        await self.get_user(self.owner).send("I'm online now!")
 
     async def on_guild_join(self, guild):
         # Alert both the console and the joined server that the bot has joined.
@@ -172,7 +169,10 @@ Also, please give me a channel to run in by typing !idk bind in that channel (Yo
     
     async def on_message(self, message):
         # Log the message in the console
-        print(f"{message.author} ({timestamp()} in {message.guild.name}#{message.channel.name}): {message.content}")
+        if message.channel.type == discord.ChannelType.private:
+            print(f"{message.author} ({timestamp()} dming {message.channel.recipient if message.author.id==self.user.id else self.user}): {message.content}")
+        else:
+            print(f"{message.author} ({timestamp()} in {message.guild.name}#{message.channel.name}): {message.content}")
         
         # If the user sent IDK in the bound IDK channel, increment the respective counter. Then announce any milestones.
         if message.content.lower() == "idk" and message.channel.id == self.channels[message.guild.id]:
@@ -236,19 +236,29 @@ Also, please give me a channel to run in by typing !idk bind in that channel (Yo
     @command("stop", "Takes the bot offline. Only usable by the creator of this bot", private=True, perms_needed=Perms.owner)
     async def end(self, args, ctx):
         # Save channel data to file
-        save_data("channels.txt", self.channels)
+        save_data(self.channels)
 
         # Go offline, end program
-        for server in self.guilds:
-            await server.system_channel.send("IDKBot is going offline. This will likely be temporary.")
+        await self.get_user(self.owner).send("Stop command ran. Exiting.")
         await ctx.channel.send("Going offline.")
         await self.change_presence(status=discord.Status.offline)
         sys.exit(f"Stop command run by {ctx.author}, bot offline. This is NOT an error.")
 
+    # What to do when the program is supposed to stop. Similar to stop command.
+    async def term(self, signum, stack):
+        print("stop signal recieved")
+        await self.get_user(self.owner).send(f"Recived signal {signal.Signals(signum).name}. Saving data and exiting.")
+        print("sent message")
+        save_data(self.channels)
+        print("saved data, going offline")
+        await self.change_presence(status=discord.Status.offline)
+        self.loop.stop()
+
 # Main function
 def main():
     # Get environment vars
-    load_dotenv()
+    if 'token' not in os.environ.keys():
+        load_dotenv()
     TOKEN = os.environ['token']
     ADMIN = int(os.environ['owner'])
 
@@ -256,8 +266,19 @@ def main():
     intents = discord.Intents.default()
     intents.members = True
 
+
     # Create and run client
-    client = IDKBot(intents = intents, owner = ADMIN)
+    client = IDKBot(
+        intents = intents, owner = ADMIN, prefix = ("!t " if ISTEST else "!idk ")
+    )
+
+    # Setup SIGTERM to send shutdown message
+    signal.signal(signal.SIGTERM, lambda *args: asyncio.create_task(client.term(*args)))
+
+    if ISTEST and os.name=='nt':
+        print("SIGINT accepted")
+        signal.signal(signal.SIGINT, lambda *args: asyncio.create_task(client.term(*args)))
+
     client.run(TOKEN)
 
 if __name__ == "__main__":
